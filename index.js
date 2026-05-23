@@ -1,4 +1,5 @@
 import express from "express";
+import axios from "axios";
 
 const app = express();
 
@@ -30,6 +31,51 @@ app.post("/webhook", (req, res) => {
   }
 
   res.sendStatus(200);
+});
+
+app.get("/test-line", async (req, res) => {
+  try {
+    const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+    const targetId = process.env.LINE_TARGET_ID;
+
+    if (!token || !targetId) {
+      return res.status(500).json({
+        ok: false,
+        error: "Missing LINE_CHANNEL_ACCESS_TOKEN or LINE_TARGET_ID",
+      });
+    }
+
+    await axios.post(
+      "https://api.line.me/v2/bot/message/push",
+      {
+        to: targetId,
+        messages: [
+          {
+            type: "text",
+            text: "✅ FRIDAY News Alert test message สำเร็จแล้ว",
+          },
+        ],
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    res.json({
+      ok: true,
+      message: "Test message sent to LINE.",
+    });
+  } catch (error) {
+    console.error("LINE PUSH ERROR:", error.response?.data || error.message);
+
+    res.status(500).json({
+      ok: false,
+      error: error.response?.data || error.message,
+    });
+  }
 });
 
 const port = process.env.PORT || 3000;
