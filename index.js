@@ -1,9 +1,45 @@
 import express from "express";
 import axios from "axios";
+import { google } from "googleapis";
 
 const app = express();
 
 app.use(express.json());
+
+function getGoogleAuth() {
+  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  let privateKey = process.env.GOOGLE_PRIVATE_KEY;
+
+  if (!email || !privateKey) {
+    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_PRIVATE_KEY");
+  }
+
+  privateKey = privateKey.replace(/\\n/g, "\n");
+
+  return new google.auth.JWT({
+    email,
+    key: privateKey,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+}
+
+async function readSheetRange(range) {
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+
+  if (!spreadsheetId) {
+    throw new Error("Missing GOOGLE_SHEET_ID");
+  }
+
+  const auth = getGoogleAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range,
+  });
+
+  return response.data.values || [];
+}
 
 app.get("/", (req, res) => {
   res.send("FRIDAY News Alert is running.");
@@ -74,6 +110,28 @@ app.get("/test-line", async (req, res) => {
     res.status(500).json({
       ok: false,
       error: error.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/test-sheet", async (req, res) => {
+  try {
+    const topics = await readSheetRange("topics!A1:D20");
+    const sources = await readSheetRange("sources!A1:E20");
+    const sentArticles = await readSheetRange("sent_articles!A1:F20");
+
+    res.json({
+      ok: true,
+      topics,
+      sources,
+      sent_articles: sentArticles,
+    });
+  } catch (error) {
+    console.error("GOOGLE SHEET ERROR:", error.message);
+
+    res.status(500).json({
+      ok: false,
+      error: error.message,
     });
   }
 });
