@@ -135,7 +135,15 @@ app.get("/test-sheet", async (req, res) => {
     });
   }
 });
-
+app.get("/debug-env", (req, res) => {
+  res.json({
+    sheet_id: process.env.GOOGLE_SHEET_ID,
+    service_account_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    has_private_key: Boolean(process.env.GOOGLE_PRIVATE_KEY),
+    private_key_starts_correctly:
+      process.env.GOOGLE_PRIVATE_KEY?.includes("BEGIN PRIVATE KEY") || false,
+  });
+});
 const port = process.env.PORT || 3000;
 
 app.listen(port, "0.0.0.0", () => {
