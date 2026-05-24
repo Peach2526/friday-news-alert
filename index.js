@@ -90,22 +90,114 @@ function rowsToObjects(rows) {
     });
 }
 
+function settingsRowsToObject(rows) {
+  const dataRows = rows.slice(1);
+  const settings = {};
+
+  for (const row of dataRows) {
+    const key = String(row[0] || "").trim();
+    const value = String(row[1] || "").trim();
+
+    if (key) {
+      settings[key] = value;
+    }
+  }
+
+  return settings;
+}
+
 function isActive(value) {
   return String(value || "").trim().toUpperCase() === "TRUE";
+}
+
+function toNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizeTimeText(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{1,2}):(\d{2})$/);
+
+  if (!match) return text;
+
+  const hour = match[1].padStart(2, "0");
+  const minute = match[2];
+
+  return `${hour}:${minute}`;
+}
+
+function getBangkokTimeText(date = new Date()) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function getBangkokHourText(date = new Date()) {
+  return getBangkokTimeText(date).slice(0, 2);
+}
+
+function getLookbackHours(settings, currentTimeText) {
+  const normalizedCurrent = normalizeTimeText(currentTimeText);
+  const morningHour = normalizeTimeText(settings.morning_hour || "07:00");
+  const eveningHour = normalizeTimeText(settings.evening_hour || "20:00");
+
+  if (normalizedCurrent === morningHour) {
+    return toNumber(settings.morning_lookback_hours, 8);
+  }
+
+  if (normalizedCurrent === eveningHour) {
+    return toNumber(settings.evening_lookback_hours, 4);
+  }
+
+  return toNumber(settings.normal_lookback_hours, 3);
 }
 
 function createArticleId(url) {
   return crypto.createHash("sha256").update(url).digest("hex").slice(0, 24);
 }
 
-function guessTopicIdFromSource(sourceId, topics) {
-  const cleanSourceId = String(sourceId || "").trim();
+function getArticleDate(item) {
+  const rawDate = item.isoDate || item.pubDate || item.date || "";
 
-  const matchedTopic = topics.find((topic) =>
-    cleanSourceId.includes(topic.topic_id)
-  );
+  if (!rawDate) return null;
 
-  return matchedTopic?.topic_id || "unknown";
+  const date = new Date(rawDate);
+
+  if (Number.isNaN(date.getTime())) return null;
+
+  return date;
+}
+
+function isWithinLookback(date, lookbackHours, now = new Date()) {
+  if (!date) return false;
+
+  const diffMs = now.getTime() - date.getTime();
+  const lookbackMs = lookbackHours * 60 * 60 * 1000;
+
+  return diffMs >= 0 && diffMs <= lookbackMs;
+}
+
+function getRecencyBonus(date, now = new Date()) {
+  if (!date) return 0;
+
+  const ageHours = (now.getTime() - date.getTime()) / (60 * 60 * 1000);
+
+  if (ageHours <= 1) return 3;
+  if (ageHours <= 3) return 2;
+  if (ageHours <= 6) return 1;
+
+  return 0;
+}
+
+function sourceBelongsToTopic(source, topic) {
+  const sourceId = String(source.source_id || "").toLowerCase();
+  const topicId = String(topic.topic_id || "").toLowerCase();
+
+  return sourceId.includes(topicId);
 }
 
 async function sendLineMessage(text) {
@@ -136,10 +228,6 @@ async function sendLineMessage(text) {
   );
 }
 
-function cleanGoogleNewsUrl(url) {
-  return String(url || "").trim();
-}
-
 function safeJsonParse(text) {
   try {
     return JSON.parse(text);
@@ -159,6 +247,8 @@ async function analyzeArticleWithOpenAI({
   if (!process.env.OPENAI_API_KEY) {
     return {
       relevant: true,
+      importance_score: 5,
+      urgency_score: 5,
       summary_th: "ยังไม่ได้ตั้งค่า OPENAI_API_KEY ระบบจึงส่งข่าวโดยไม่สรุปด้วย AI",
       reason_th: "OpenAI API key missing",
     };
@@ -167,15 +257,24 @@ async function analyzeArticleWithOpenAI({
   const prompt = `
 คุณคือผู้ช่วยคัดกรองข่าวสำหรับระบบแจ้งเตือน LINE
 
-ให้ตัดสินว่าข่าวนี้เกี่ยวข้องกับหัวข้อที่ติดตามจริงหรือไม่
+ให้ประเมินว่าข่าวนี้เกี่ยวข้องกับหัวข้อที่ติดตามจริงหรือไม่ และควรแจ้งเตือนมากน้อยแค่ไหน
 ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown ห้ามมีคำอธิบายนอก JSON
 
 รูปแบบ JSON:
 {
   "relevant": true,
+  "importance_score": 1,
+  "urgency_score": 1,
   "summary_th": "สรุปข่าวภาษาไทย 1-2 ประโยค",
-  "reason_th": "เหตุผลสั้น ๆ ว่าทำไมข่าวนี้เกี่ยวหรือไม่เกี่ยว"
+  "reason_th": "เหตุผลสั้น ๆ ว่าทำไมข่าวนี้ควรหรือไม่ควรถูกเลือก"
 }
+
+เงื่อนไขคะแนน:
+- importance_score ให้ 1-10
+- urgency_score ให้ 1-10
+- ถ้าเป็นข่าวสำคัญ เช่น ความขัดแย้ง ความมั่นคง การทูต เหตุรุนแรง นโยบายรัฐ ผลกระทบสาธารณะ ให้คะแนนสูง
+- ถ้าเป็นข่าวท่องเที่ยวทั่วไป รีวิว โรงแรม โปรโมชัน บทความ evergreen หรือข้อมูลพื้นหลังที่ไม่ใช่ข่าวใหม่ ให้ relevant=false หรือคะแนนต่ำ
+- summary_th ต้องไม่เดาข้อมูลเกินจากหัวข้อข่าว/ข้อมูลที่ให้
 
 หัวข้อที่ติดตาม: ${topicName}
 keywords: ${keywords}
@@ -183,11 +282,6 @@ keywords: ${keywords}
 หัวข้อข่าว: ${title}
 วันที่ข่าว: ${pubDate || ""}
 ลิงก์: ${link}
-
-เกณฑ์:
-- ถ้าข่าวเกี่ยวกับหัวข้อหลักจริง ให้ relevant เป็น true
-- ถ้าเป็นข่าวทั่วไปที่มีคำซ้ำแต่ไม่เกี่ยวกับหัวข้อหลัก ให้ relevant เป็น false
-- summary_th ต้องเป็นภาษาไทย กระชับ และไม่เดาข้อมูลเกินจากหัวข้อข่าว/ข้อมูลที่ให้
 `;
 
   const completion = await openai.chat.completions.create({
@@ -213,13 +307,17 @@ keywords: ${keywords}
   if (!parsed || typeof parsed.relevant !== "boolean") {
     return {
       relevant: false,
+      importance_score: 0,
+      urgency_score: 0,
       summary_th: "",
       reason_th: "OpenAI response could not be parsed as expected.",
     };
   }
 
   return {
-    relevant: parsed.relevant,
+    relevant: Boolean(parsed.relevant),
+    importance_score: Math.max(0, Math.min(10, Number(parsed.importance_score) || 0)),
+    urgency_score: Math.max(0, Math.min(10, Number(parsed.urgency_score) || 0)),
     summary_th: String(parsed.summary_th || "").trim(),
     reason_th: String(parsed.reason_th || "").trim(),
   };
@@ -232,6 +330,8 @@ function buildNewsMessage({
   link,
   pubDate,
   analysis,
+  finalScore,
+  lookbackHours,
 }) {
   return [
     `📰 [${topicName}]`,
@@ -239,12 +339,14 @@ function buildNewsMessage({
     `หัวข้อ: ${title}`,
     "",
     analysis?.summary_th ? `สรุป: ${analysis.summary_th}` : "",
-    analysis?.reason_th ? `เหตุผลที่เกี่ยวข้อง: ${analysis.reason_th}` : "",
+    analysis?.reason_th ? `เหตุผลที่เลือก: ${analysis.reason_th}` : "",
     "",
     `แหล่งข่าว: ${sourceName}`,
     pubDate ? `วันที่ข่าว: ${pubDate}` : "",
+    `รอบนี้ดูย้อนหลัง: ${lookbackHours} ชั่วโมง`,
+    `คะแนน: ${finalScore}`,
     "",
-    `ลิงก์: ${cleanGoogleNewsUrl(link)}`,
+    `ลิงก์: ${link}`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -298,15 +400,17 @@ app.get("/test-line", async (req, res) => {
 
 app.get("/test-sheet", async (req, res) => {
   try {
-    const topics = await readSheetRange("topics!A1:D50");
-    const sources = await readSheetRange("sources!A1:E50");
-    const sentArticles = await readSheetRange("sent_articles!A1:F200");
+    const topics = await readSheetRange("topics!A1:D100");
+    const sources = await readSheetRange("sources!A1:E100");
+    const sentArticles = await readSheetRange("sent_articles!A1:F1000");
+    const settings = await readSheetRange("settings!A1:B100");
 
     res.json({
       ok: true,
       topics,
       sources,
       sent_articles: sentArticles,
+      settings,
     });
   } catch (error) {
     console.error("GOOGLE SHEET ERROR:", error.message);
@@ -331,9 +435,12 @@ app.get("/debug-env", (req, res) => {
 
 app.get("/run-news-check", async (req, res) => {
   try {
-    const topicRows = await readSheetRange("topics!A1:D50");
-    const sourceRows = await readSheetRange("sources!A1:E50");
-    const sentRows = await readSheetRange("sent_articles!A1:F1000");
+    const now = new Date();
+
+    const topicRows = await readSheetRange("topics!A1:D100");
+    const sourceRows = await readSheetRange("sources!A1:E100");
+    const sentRows = await readSheetRange("sent_articles!A1:F2000");
+    const settingRows = await readSheetRange("settings!A1:B100");
 
     const topics = rowsToObjects(topicRows).filter((topic) =>
       isActive(topic.active)
@@ -348,125 +455,248 @@ app.get("/run-news-check", async (req, res) => {
       sentArticles.map((article) => article.article_id)
     );
 
+    const settings = settingsRowsToObject(settingRows);
+
+    const currentTimeText =
+      req.query.time ||
+      getBangkokTimeText(now);
+
+    const normalizedCurrentTime = normalizeTimeText(currentTimeText);
+    const currentHourText = normalizeTimeText(normalizedCurrentTime).slice(0, 2);
+
+    const scheduleHours = String(settings.schedule_hours || "")
+      .split(",")
+      .map((item) => normalizeTimeText(item.trim()))
+      .filter(Boolean);
+
+    const scheduleHourOnly = scheduleHours.map((item) => item.slice(0, 2));
+
+    const shouldRespectSchedule = req.query.force !== "true";
+
+    if (
+      shouldRespectSchedule &&
+      scheduleHourOnly.length > 0 &&
+      !scheduleHourOnly.includes(currentHourText)
+    ) {
+      return res.json({
+        ok: true,
+        skipped: true,
+        reason: "Current Bangkok hour is not in schedule_hours.",
+        current_time_bangkok: normalizedCurrentTime,
+        schedule_hours: scheduleHours,
+      });
+    }
+
+    const lookbackHours = req.query.lookbackHours
+      ? toNumber(req.query.lookbackHours, 3)
+      : getLookbackHours(settings, normalizedCurrentTime);
+
+    const maxItemsPerSource = toNumber(settings.max_items_per_source, 5);
+    const maxSendPerTopic = toNumber(settings.max_send_per_topic_per_run, 1);
+
     const results = [];
-    let sentCount = 0;
-    const maxSendPerRun = 5;
+    let totalSentCount = 0;
 
-    for (const source of sources) {
-      if (sentCount >= maxSendPerRun) break;
+    for (const topic of topics) {
+      const topicSources = sources.filter((source) =>
+        sourceBelongsToTopic(source, topic)
+      );
 
-      if (!source.url || source.url === "RSS_URL") {
+      if (topicSources.length === 0) {
         results.push({
-          source: source.source_name,
+          topic_id: topic.topic_id,
           status: "skipped",
-          reason: "Missing RSS URL",
+          reason: "No sources found for topic",
         });
         continue;
       }
 
-      if (source.type !== "rss") {
-        results.push({
-          source: source.source_name,
-          status: "skipped",
-          reason: "Unsupported source type",
-        });
-        continue;
-      }
+      const candidates = [];
 
-      const topicId = guessTopicIdFromSource(source.source_id, topics);
-      const topic = topics.find((item) => item.topic_id === topicId);
-
-      if (!topic) {
-        results.push({
-          source: source.source_name,
-          status: "skipped",
-          reason: `No matching topic for source_id: ${source.source_id}`,
-        });
-        continue;
-      }
-
-      const feed = await parser.parseURL(source.url);
-      const items = feed.items || [];
-
-      for (const item of items.slice(0, 5)) {
-        if (sentCount >= maxSendPerRun) break;
-
-        const title = item.title || "Untitled";
-        const link = item.link || item.guid;
-
-        if (!link) continue;
-
-        const articleId = createArticleId(link);
-
-        if (sentArticleIds.has(articleId)) {
+      for (const source of topicSources) {
+        if (!source.url || source.url === "RSS_URL") {
           results.push({
-            status: "duplicate_skipped",
             topic_id: topic.topic_id,
             source: source.source_name,
-            title,
+            status: "source_skipped",
+            reason: "Missing RSS URL",
           });
           continue;
         }
 
-        const pubDate = item.isoDate || item.pubDate || "";
+        if (source.type !== "rss") {
+          results.push({
+            topic_id: topic.topic_id,
+            source: source.source_name,
+            status: "source_skipped",
+            reason: "Unsupported source type",
+          });
+          continue;
+        }
 
+        let feed;
+
+        try {
+          feed = await parser.parseURL(source.url);
+        } catch (error) {
+          results.push({
+            topic_id: topic.topic_id,
+            source: source.source_name,
+            status: "source_error",
+            reason: error.message,
+          });
+          continue;
+        }
+
+        const items = feed.items || [];
+
+        for (const item of items.slice(0, maxItemsPerSource)) {
+          const title = item.title || "Untitled";
+          const link = item.link || item.guid;
+
+          if (!link) continue;
+
+          const articleId = createArticleId(link);
+
+          if (sentArticleIds.has(articleId)) {
+            continue;
+          }
+
+          const articleDate = getArticleDate(item);
+
+          if (!isWithinLookback(articleDate, lookbackHours, now)) {
+            continue;
+          }
+
+          candidates.push({
+            articleId,
+            topic,
+            source,
+            title,
+            link,
+            pubDate: item.isoDate || item.pubDate || "",
+            articleDate,
+          });
+        }
+      }
+
+      if (candidates.length === 0) {
+        results.push({
+          topic_id: topic.topic_id,
+          status: "no_candidates",
+          reason: "No new articles within lookback window",
+          lookback_hours: lookbackHours,
+        });
+        continue;
+      }
+
+      const analyzedCandidates = [];
+
+      for (const candidate of candidates) {
         const analysis = await analyzeArticleWithOpenAI({
           topicName: topic.topic_name,
           keywords: topic.keywords,
-          sourceName: source.source_name,
-          title,
-          link,
-          pubDate,
+          sourceName: candidate.source.source_name,
+          title: candidate.title,
+          link: candidate.link,
+          pubDate: candidate.pubDate,
         });
 
         if (!analysis.relevant) {
-          results.push({
-            status: "ai_skipped",
-            topic_id: topic.topic_id,
-            source: source.source_name,
-            title,
-            reason: analysis.reason_th,
+          analyzedCandidates.push({
+            ...candidate,
+            analysis,
+            finalScore: 0,
+            skippedByAi: true,
           });
+
           continue;
         }
 
+        const recencyBonus = getRecencyBonus(candidate.articleDate, now);
+
+        const finalScore =
+          analysis.importance_score * 2 +
+          analysis.urgency_score +
+          recencyBonus;
+
+        analyzedCandidates.push({
+          ...candidate,
+          analysis,
+          finalScore,
+          skippedByAi: false,
+        });
+      }
+
+      const rankedCandidates = analyzedCandidates
+        .filter((candidate) => !candidate.skippedByAi)
+        .sort((a, b) => b.finalScore - a.finalScore);
+
+      if (rankedCandidates.length === 0) {
+        results.push({
+          topic_id: topic.topic_id,
+          status: "ai_skipped_all",
+          reason: "OpenAI found no relevant article",
+          checked_count: analyzedCandidates.length,
+          examples: analyzedCandidates.slice(0, 3).map((candidate) => ({
+            title: candidate.title,
+            reason: candidate.analysis.reason_th,
+          })),
+        });
+        continue;
+      }
+
+      const winners = rankedCandidates.slice(0, maxSendPerTopic);
+
+      for (const winner of winners) {
         const message = buildNewsMessage({
           topicName: topic.topic_name,
-          sourceName: source.source_name,
-          title,
-          link,
-          pubDate,
-          analysis,
+          sourceName: winner.source.source_name,
+          title: winner.title,
+          link: winner.link,
+          pubDate: winner.pubDate,
+          analysis: winner.analysis,
+          finalScore: winner.finalScore,
+          lookbackHours,
         });
 
         await sendLineMessage(message);
 
         await appendSheetRow("sent_articles!A:F", [
-          articleId,
+          winner.articleId,
           topic.topic_id,
-          title,
-          link,
-          source.source_name,
+          winner.title,
+          winner.link,
+          winner.source.source_name,
           new Date().toISOString(),
         ]);
 
-        sentArticleIds.add(articleId);
-        sentCount += 1;
+        sentArticleIds.add(winner.articleId);
+        totalSentCount += 1;
 
         results.push({
-          status: "sent",
           topic_id: topic.topic_id,
-          source: source.source_name,
-          title,
-          summary_th: analysis.summary_th,
-          link,
+          status: "sent_best_article",
+          source: winner.source.source_name,
+          title: winner.title,
+          score: winner.finalScore,
+          importance_score: winner.analysis.importance_score,
+          urgency_score: winner.analysis.urgency_score,
+          summary_th: winner.analysis.summary_th,
+          reason_th: winner.analysis.reason_th,
+          candidate_count: candidates.length,
+          link: winner.link,
         });
       }
     }
 
     res.json({
       ok: true,
-      sent_count: sentCount,
+      mode: "best_article_per_topic",
+      current_time_bangkok: normalizedCurrentTime,
+      lookback_hours: lookbackHours,
+      max_send_per_topic_per_run: maxSendPerTopic,
+      sent_count: totalSentCount,
       results,
     });
   } catch (error) {
