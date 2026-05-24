@@ -3,9 +3,14 @@ import axios from "axios";
 import { google } from "googleapis";
 import Parser from "rss-parser";
 import crypto from "crypto";
+import OpenAI from "openai";
 
 const app = express();
 const parser = new Parser();
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 app.use(express.json());
 
@@ -131,16 +136,115 @@ async function sendLineMessage(text) {
   );
 }
 
-function buildNewsMessage({ topicName, sourceName, title, link, pubDate }) {
+function cleanGoogleNewsUrl(url) {
+  return String(url || "").trim();
+}
+
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+async function analyzeArticleWithOpenAI({
+  topicName,
+  keywords,
+  sourceName,
+  title,
+  link,
+  pubDate,
+}) {
+  if (!process.env.OPENAI_API_KEY) {
+    return {
+      relevant: true,
+      summary_th: "ยังไม่ได้ตั้งค่า OPENAI_API_KEY ระบบจึงส่งข่าวโดยไม่สรุปด้วย AI",
+      reason_th: "OpenAI API key missing",
+    };
+  }
+
+  const prompt = `
+คุณคือผู้ช่วยคัดกรองข่าวสำหรับระบบแจ้งเตือน LINE
+
+ให้ตัดสินว่าข่าวนี้เกี่ยวข้องกับหัวข้อที่ติดตามจริงหรือไม่
+ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown ห้ามมีคำอธิบายนอก JSON
+
+รูปแบบ JSON:
+{
+  "relevant": true,
+  "summary_th": "สรุปข่าวภาษาไทย 1-2 ประโยค",
+  "reason_th": "เหตุผลสั้น ๆ ว่าทำไมข่าวนี้เกี่ยวหรือไม่เกี่ยว"
+}
+
+หัวข้อที่ติดตาม: ${topicName}
+keywords: ${keywords}
+แหล่งข่าว: ${sourceName}
+หัวข้อข่าว: ${title}
+วันที่ข่าว: ${pubDate || ""}
+ลิงก์: ${link}
+
+เกณฑ์:
+- ถ้าข่าวเกี่ยวกับหัวข้อหลักจริง ให้ relevant เป็น true
+- ถ้าเป็นข่าวทั่วไปที่มีคำซ้ำแต่ไม่เกี่ยวกับหัวข้อหลัก ให้ relevant เป็น false
+- summary_th ต้องเป็นภาษาไทย กระชับ และไม่เดาข้อมูลเกินจากหัวข้อข่าว/ข้อมูลที่ให้
+`;
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a careful news filtering assistant. You must respond with valid JSON only.",
+      },
+      {
+        role: "user",
+        content: prompt,
+      },
+    ],
+    response_format: { type: "json_object" },
+    temperature: 0.2,
+  });
+
+  const content = completion.choices?.[0]?.message?.content || "{}";
+  const parsed = safeJsonParse(content);
+
+  if (!parsed || typeof parsed.relevant !== "boolean") {
+    return {
+      relevant: false,
+      summary_th: "",
+      reason_th: "OpenAI response could not be parsed as expected.",
+    };
+  }
+
+  return {
+    relevant: parsed.relevant,
+    summary_th: String(parsed.summary_th || "").trim(),
+    reason_th: String(parsed.reason_th || "").trim(),
+  };
+}
+
+function buildNewsMessage({
+  topicName,
+  sourceName,
+  title,
+  link,
+  pubDate,
+  analysis,
+}) {
   return [
     `📰 [${topicName}]`,
     "",
-    title,
+    `หัวข้อ: ${title}`,
+    "",
+    analysis?.summary_th ? `สรุป: ${analysis.summary_th}` : "",
+    analysis?.reason_th ? `เหตุผลที่เกี่ยวข้อง: ${analysis.reason_th}` : "",
     "",
     `แหล่งข่าว: ${sourceName}`,
     pubDate ? `วันที่ข่าว: ${pubDate}` : "",
     "",
-    link,
+    `ลิงก์: ${cleanGoogleNewsUrl(link)}`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -221,6 +325,7 @@ app.get("/debug-env", (req, res) => {
     has_private_key: Boolean(process.env.GOOGLE_PRIVATE_KEY),
     private_key_starts_correctly:
       process.env.GOOGLE_PRIVATE_KEY?.includes("BEGIN PRIVATE KEY") || false,
+    has_openai_key: Boolean(process.env.OPENAI_API_KEY),
   });
 });
 
@@ -294,10 +399,36 @@ app.get("/run-news-check", async (req, res) => {
         const articleId = createArticleId(link);
 
         if (sentArticleIds.has(articleId)) {
+          results.push({
+            status: "duplicate_skipped",
+            topic_id: topic.topic_id,
+            source: source.source_name,
+            title,
+          });
           continue;
         }
 
         const pubDate = item.isoDate || item.pubDate || "";
+
+        const analysis = await analyzeArticleWithOpenAI({
+          topicName: topic.topic_name,
+          keywords: topic.keywords,
+          sourceName: source.source_name,
+          title,
+          link,
+          pubDate,
+        });
+
+        if (!analysis.relevant) {
+          results.push({
+            status: "ai_skipped",
+            topic_id: topic.topic_id,
+            source: source.source_name,
+            title,
+            reason: analysis.reason_th,
+          });
+          continue;
+        }
 
         const message = buildNewsMessage({
           topicName: topic.topic_name,
@@ -305,6 +436,7 @@ app.get("/run-news-check", async (req, res) => {
           title,
           link,
           pubDate,
+          analysis,
         });
 
         await sendLineMessage(message);
@@ -326,6 +458,7 @@ app.get("/run-news-check", async (req, res) => {
           topic_id: topic.topic_id,
           source: source.source_name,
           title,
+          summary_th: analysis.summary_th,
           link,
         });
       }
