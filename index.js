@@ -265,7 +265,7 @@ async function analyzeArticleWithOpenAI({
   "relevant": true,
   "importance_score": 1,
   "urgency_score": 1,
-  "summary_th": "สรุปข่าวภาษาไทย 1-2 ประโยค",
+  "summary_th": "สรุปข่าวภาษาไทยแบบละเอียด 3-5 ประโยค โดยอธิบายว่าเกิดอะไรขึ้น ใครเกี่ยวข้อง ผลกระทบคืออะไร และสถานการณ์ล่าสุด",
   "reason_th": "เหตุผลสั้น ๆ ว่าทำไมข่าวนี้ควรหรือไม่ควรถูกเลือก"
 }
 
@@ -274,7 +274,9 @@ async function analyzeArticleWithOpenAI({
 - urgency_score ให้ 1-10
 - ถ้าเป็นข่าวสำคัญ เช่น ความขัดแย้ง ความมั่นคง การทูต เหตุรุนแรง นโยบายรัฐ ผลกระทบสาธารณะ ให้คะแนนสูง
 - ถ้าเป็นข่าวท่องเที่ยวทั่วไป รีวิว โรงแรม โปรโมชัน บทความ evergreen หรือข้อมูลพื้นหลังที่ไม่ใช่ข่าวใหม่ ให้ relevant=false หรือคะแนนต่ำ
-- summary_th ต้องไม่เดาข้อมูลเกินจากหัวข้อข่าว/ข้อมูลที่ให้
+- summary_th ให้สรุปละเอียด อ่านแล้วเข้าใจข่าวได้ทันที
+- ใช้ภาษาไทยแบบข่าวสั้น อ่านง่าย
+- ถ้าข้อมูลมีจำกัด ห้ามเดาเกินข้อมูลข่าว
 
 หัวข้อที่ติดตาม: ${topicName}
 keywords: ${keywords}
@@ -323,6 +325,42 @@ keywords: ${keywords}
   };
 }
 
+function formatThaiDate(dateString) {
+  if (!dateString) return "";
+
+  const date = new Date(dateString);
+
+  if (Number.isNaN(date.getTime())) return dateString;
+
+  const bangkokDate = new Date(
+    date.toLocaleString("en-US", { timeZone: "Asia/Bangkok" })
+  );
+
+  const thaiMonths = [
+    "ม.ค.",
+    "ก.พ.",
+    "มี.ค.",
+    "เม.ย.",
+    "พ.ค.",
+    "มิ.ย.",
+    "ก.ค.",
+    "ส.ค.",
+    "ก.ย.",
+    "ต.ค.",
+    "พ.ย.",
+    "ธ.ค.",
+  ];
+
+  const day = bangkokDate.getDate();
+  const month = thaiMonths[bangkokDate.getMonth()];
+  const year = String(bangkokDate.getFullYear() + 543).slice(-2);
+
+  const hours = String(bangkokDate.getHours()).padStart(2, "0");
+  const minutes = String(bangkokDate.getMinutes()).padStart(2, "0");
+
+  return `${day} ${month}${year} เวลา ${hours}${minutes} น.`;
+}
+
 function buildNewsMessage({
   topicName,
   sourceName,
@@ -330,23 +368,18 @@ function buildNewsMessage({
   link,
   pubDate,
   analysis,
-  finalScore,
-  lookbackHours,
 }) {
   return [
     `📰 [${topicName}]`,
     "",
-    `หัวข้อ: ${title}`,
+    `${title}`,
     "",
-    analysis?.summary_th ? `สรุป: ${analysis.summary_th}` : "",
-    analysis?.reason_th ? `เหตุผลที่เลือก: ${analysis.reason_th}` : "",
+    analysis?.summary_th || "",
     "",
     `แหล่งข่าว: ${sourceName}`,
-    pubDate ? `วันที่ข่าว: ${pubDate}` : "",
-    `รอบนี้ดูย้อนหลัง: ${lookbackHours} ชั่วโมง`,
-    `คะแนน: ${finalScore}`,
+    pubDate ? `ออกข่าวเมื่อ ${formatThaiDate(pubDate)}` : "",
     "",
-    `ลิงก์: ${link}`,
+    `อ่านต่อ: ${link}`,
   ]
     .filter(Boolean)
     .join("\n");
