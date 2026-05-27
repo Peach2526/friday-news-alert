@@ -15,22 +15,12 @@ const openai = new OpenAI({
 app.use(express.json());
 
 app.use((req, res, next) => {
-  const allowedOrigins = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "https://friday-news-alert.onrender.com",
-    "https://chatgpt.com",
-  ];
-
-  const origin = req.headers.origin;
-
-  if (!origin || allowedOrigins.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin || "*");
-  }
-
-  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type,Authorization,Accept"
+  );
 
   if (req.method === "OPTIONS") {
     return res.sendStatus(204);
