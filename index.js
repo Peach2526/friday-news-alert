@@ -14,6 +14,31 @@ const openai = new OpenAI({
 
 app.use(express.json());
 
+app.use((req, res, next) => {
+  const allowedOrigins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://friday-news-alert.onrender.com",
+    "https://chatgpt.com",
+  ];
+
+  const origin = req.headers.origin;
+
+  if (!origin || allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  }
+
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  return next();
+});
+
 function getGoogleAuth() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   let privateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -358,7 +383,7 @@ function formatThaiDate(dateString) {
   const hours = String(bangkokDate.getHours()).padStart(2, "0");
   const minutes = String(bangkokDate.getMinutes()).padStart(2, "0");
 
-  return `${day} ${month}${year} เวลา ${hours}${minutes} น.`;
+  return `${day} ${month}${year} เวลา ${hours}:${minutes} น.`;
 }
 
 function buildNewsMessage({
@@ -384,6 +409,377 @@ function buildNewsMessage({
     .filter(Boolean)
     .join("\n");
 }
+
+const SECURITY_NEWS_CACHE = new Map();
+
+const SECURITY_AREAS = {
+  phuket: {
+    label: "ภูเก็ต",
+    queries: [
+      "Phuket nominee business",
+      "Phuket illegal business foreigner",
+      "Phuket mafia foreigner",
+      "Phuket visa overstay",
+      "Phuket work permit foreigner",
+      "Phuket property crackdown foreigner",
+      "ภูเก็ต นอมินี",
+      "ภูเก็ต ธุรกิจผิดกฎหมาย ต่างชาติ",
+      "ภูเก็ต มาเฟีย ต่างชาติ",
+      "ภูเก็ต แย่งอาชีพ คนไทย",
+      "ภูเก็ต ตรวจคนเข้าเมือง ต่างชาติ",
+      "ภูเก็ต จับกุม ต่างชาติ",
+    ],
+  },
+
+  koh_samui: {
+    label: "เกาะสมุย",
+    queries: [
+      "Koh Samui nominee business",
+      "Koh Samui illegal business foreigner",
+      "Koh Samui mafia foreigner",
+      "Koh Samui visa overstay",
+      "Koh Samui work permit foreigner",
+      "Koh Samui foreigner crime",
+      "เกาะสมุย นอมินี",
+      "สมุย ธุรกิจผิดกฎหมาย ต่างชาติ",
+      "สมุย มาเฟีย ต่างชาติ",
+      "สมุย แย่งอาชีพ คนไทย",
+      "สมุย ตรวจคนเข้าเมือง ต่างชาติ",
+      "สมุย จับกุม ต่างชาติ",
+    ],
+  },
+
+  koh_phangan: {
+    label: "เกาะพะงัน",
+    queries: [
+      "Koh Phangan nominee business",
+      "Koh Phangan illegal business foreigner",
+      "Koh Phangan mafia foreigner",
+      "Koh Phangan visa overstay",
+      "Koh Phangan work permit foreigner",
+      "Koh Phangan foreigner crime",
+      "Koh Pha-ngan nominee business",
+      "เกาะพะงัน นอมินี",
+      "เกาะพงัน นอมินี",
+      "พะงัน ธุรกิจผิดกฎหมาย ต่างชาติ",
+      "พงัน ธุรกิจผิดกฎหมาย ต่างชาติ",
+      "พะงัน มาเฟีย ต่างชาติ",
+      "พงัน มาเฟีย ต่างชาติ",
+      "พะงัน แย่งอาชีพ คนไทย",
+      "พงัน แย่งอาชีพ คนไทย",
+      "เกาะพะงัน ตรวจคนเข้าเมือง ต่างชาติ",
+      "เกาะพงัน จับกุม ต่างชาติ",
+    ],
+  },
+
+  mae_hong_son: {
+    label: "แม่ฮ่องสอน",
+    queries: [
+      "Mae Hong Son illegal business",
+      "Mae Hong Son foreigner crime",
+      "Mae Hong Son border security",
+      "Mae Hong Son nominee business",
+      "Mae Hong Son drug trafficking",
+      "Mae Hong Son smuggling",
+      "แม่ฮ่องสอน ธุรกิจผิดกฎหมาย",
+      "แม่ฮ่องสอน ต่างชาติ",
+      "แม่ฮ่องสอน ชายแดน",
+      "แม่ฮ่องสอน ความมั่นคง",
+      "แม่ฮ่องสอน ยาเสพติด",
+      "แม่ฮ่องสอน ลักลอบ",
+      "แม่ฮ่องสอน จับกุม",
+    ],
+  },
+};
+
+function buildGoogleNewsRssUrl(query, lang = "th") {
+  const encodedQuery = encodeURIComponent(`${query} when:7d`);
+  const hl = lang === "en" ? "en" : "th";
+  const ceid = lang === "en" ? "TH:en" : "TH:th";
+
+  return `https://news.google.com/rss/search?q=${encodedQuery}&hl=${hl}&gl=TH&ceid=${ceid}`;
+}
+
+function getSecurityTargetAreas(area) {
+  if (area === "all") {
+    return Object.entries(SECURITY_AREAS);
+  }
+
+  if (area === "samui_phangan") {
+    return [
+      ["koh_samui", SECURITY_AREAS.koh_samui],
+      ["koh_phangan", SECURITY_AREAS.koh_phangan],
+    ];
+  }
+
+  if (SECURITY_AREAS[area]) {
+    return [[area, SECURITY_AREAS[area]]];
+  }
+
+  return null;
+}
+
+function normalizeSecurityNewsItem(item, areaKey, areaLabel, query, feedTitle) {
+  const title = item.title || "";
+  const link = item.link || item.guid || "";
+  const pubDate = item.isoDate || item.pubDate || "";
+
+  const source =
+    item.source?.title ||
+    item.creator ||
+    feedTitle ||
+    "Google News";
+
+  return {
+    id: createArticleId(link || `${title}-${pubDate}`),
+    area: areaKey,
+    area_label: areaLabel,
+    query,
+    title,
+    link,
+    source,
+    published_at: pubDate,
+    snippet: item.contentSnippet || item.content || "",
+  };
+}
+
+function detectRiskCategory(text) {
+  const value = String(text || "").toLowerCase();
+
+  if (
+    value.includes("nominee") ||
+    value.includes("นอมินี") ||
+    value.includes("ตัวแทนถือหุ้น")
+  ) {
+    return "nominee_business";
+  }
+
+  if (
+    value.includes("illegal business") ||
+    value.includes("ธุรกิจผิดกฎหมาย") ||
+    value.includes("ประกอบธุรกิจผิด") ||
+    value.includes("ผิดกฎหมาย")
+  ) {
+    return "illegal_business";
+  }
+
+  if (
+    value.includes("mafia") ||
+    value.includes("มาเฟีย") ||
+    value.includes("organized crime") ||
+    value.includes("อิทธิพล")
+  ) {
+    return "foreign_mafia";
+  }
+
+  if (
+    value.includes("visa") ||
+    value.includes("overstay") ||
+    value.includes("วีซ่า") ||
+    value.includes("อยู่เกินกำหนด") ||
+    value.includes("immigration") ||
+    value.includes("ตรวจคนเข้าเมือง")
+  ) {
+    return "visa_overstay";
+  }
+
+  if (
+    value.includes("work permit") ||
+    value.includes("ใบอนุญาตทำงาน") ||
+    value.includes("แย่งอาชีพ") ||
+    value.includes("อาชีพคนไทย")
+  ) {
+    return "work_permit_or_local_job";
+  }
+
+  if (
+    value.includes("drug") ||
+    value.includes("ยาเสพติด") ||
+    value.includes("ยาไอซ์") ||
+    value.includes("โคเคน") ||
+    value.includes("narcotic")
+  ) {
+    return "drug_crime";
+  }
+
+  return "general_security";
+}
+
+function getSecurityReason(item) {
+  const text = `${item.title} ${item.snippet}`;
+  const category = detectRiskCategory(text);
+
+  const reasons = {
+    nominee_business:
+      "ข่าวนี้เกี่ยวข้องกับประเด็นนอมินีหรือการถือครองธุรกิจแทนกัน ซึ่งอาจกระทบต่อโครงสร้างธุรกิจท้องถิ่นและการบังคับใช้กฎหมาย",
+    illegal_business:
+      "ข่าวนี้เกี่ยวข้องกับธุรกิจผิดกฎหมายหรือการประกอบธุรกิจที่อาจไม่เป็นไปตามกฎหมายในพื้นที่",
+    foreign_mafia:
+      "ข่าวนี้เกี่ยวข้องกับเครือข่ายอิทธิพล อาชญากรรม หรือกลุ่มผิดกฎหมายที่อาจกระทบความปลอดภัยในพื้นที่",
+    visa_overstay:
+      "ข่าวนี้เกี่ยวข้องกับการตรวจคนเข้าเมือง วีซ่า หรือการพำนักของชาวต่างชาติ ซึ่งเป็นประเด็นด้านความมั่นคงและการบังคับใช้กฎหมาย",
+    work_permit_or_local_job:
+      "ข่าวนี้เกี่ยวข้องกับใบอนุญาตทำงาน การประกอบอาชีพของชาวต่างชาติ หรือผลกระทบต่ออาชีพของคนท้องถิ่น",
+    drug_crime:
+      "ข่าวนี้เกี่ยวข้องกับยาเสพติดหรืออาชญากรรมที่อาจกระทบความปลอดภัยของประชาชนและการท่องเที่ยว",
+    general_security:
+      "ข่าวนี้เกิดขึ้นหรือเกี่ยวข้องกับพื้นที่ที่ติดตาม และอาจมีผลต่อความปลอดภัย การท่องเที่ยว หรือการทำงานของเจ้าหน้าที่ในพื้นที่",
+  };
+
+  return reasons[category];
+}
+
+function enrichSecurityNewsItem(item) {
+  const text = `${item.title} ${item.snippet}`;
+  const riskCategory = detectRiskCategory(text);
+
+  let severity = 4;
+
+  if (riskCategory === "foreign_mafia") severity = 8;
+  if (riskCategory === "nominee_business") severity = 7;
+  if (riskCategory === "illegal_business") severity = 7;
+  if (riskCategory === "drug_crime") severity = 7;
+  if (riskCategory === "visa_overstay") severity = 5;
+  if (riskCategory === "work_permit_or_local_job") severity = 6;
+
+  return {
+    ...item,
+    risk_category: riskCategory,
+    severity,
+    reason_th: getSecurityReason(item),
+  };
+}
+
+function isSecurityNewsWithinDays(item, days = 7) {
+  const date = new Date(item.published_at);
+
+  if (Number.isNaN(date.getTime())) return true;
+
+  const ageMs = Date.now() - date.getTime();
+  const maxAgeMs = days * 24 * 60 * 60 * 1000;
+
+  return ageMs >= 0 && ageMs <= maxAgeMs;
+}
+
+app.get("/api/security-news", async (req, res) => {
+  try {
+    const area = String(req.query.area || "all").trim();
+    const limit = Math.min(toNumber(req.query.limit, 80), 120);
+    const targetAreas = getSecurityTargetAreas(area);
+
+    if (!targetAreas) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid area",
+        allowed_areas: [
+          "all",
+          "samui_phangan",
+          "koh_samui",
+          "koh_phangan",
+          "mae_hong_son",
+          "phuket",
+        ],
+      });
+    }
+
+    const cacheKey = `security-news:${area}:${limit}`;
+    const cached = SECURITY_NEWS_CACHE.get(cacheKey);
+    const now = Date.now();
+    const cacheTtlMs = 5 * 60 * 1000;
+
+    if (cached && now - cached.createdAt < cacheTtlMs) {
+      return res.json({
+        ok: true,
+        cached: true,
+        area,
+        updated_at: new Date(cached.createdAt).toISOString(),
+        count: cached.items.length,
+        items: cached.items,
+      });
+    }
+
+    const allItems = [];
+
+    for (const [areaKey, areaConfig] of targetAreas) {
+      for (const query of areaConfig.queries) {
+        try {
+          const lang = /[a-zA-Z]/.test(query) ? "en" : "th";
+          const rssUrl = buildGoogleNewsRssUrl(query, lang);
+          const feed = await parser.parseURL(rssUrl);
+
+          const items = (feed.items || [])
+            .slice(0, 8)
+            .map((item) =>
+              normalizeSecurityNewsItem(
+                item,
+                areaKey,
+                areaConfig.label,
+                query,
+                feed.title
+              )
+            )
+            .filter((item) => isSecurityNewsWithinDays(item, 7))
+            .map(enrichSecurityNewsItem);
+
+          allItems.push(...items);
+        } catch (error) {
+          console.error(
+            "SECURITY RSS ERROR:",
+            areaKey,
+            query,
+            error.message
+          );
+        }
+      }
+    }
+
+    const seen = new Set();
+
+    const uniqueItems = allItems
+      .filter((item) => {
+        if (!item.link && !item.title) return false;
+
+        if (seen.has(item.id)) {
+          return false;
+        }
+
+        seen.add(item.id);
+        return true;
+      })
+      .sort((a, b) => {
+        const dateA = new Date(a.published_at).getTime() || 0;
+        const dateB = new Date(b.published_at).getTime() || 0;
+
+        if (b.severity !== a.severity) {
+          return b.severity - a.severity;
+        }
+
+        return dateB - dateA;
+      })
+      .slice(0, limit);
+
+    SECURITY_NEWS_CACHE.set(cacheKey, {
+      createdAt: now,
+      items: uniqueItems,
+    });
+
+    return res.json({
+      ok: true,
+      cached: false,
+      area,
+      updated_at: new Date().toISOString(),
+      count: uniqueItems.length,
+      items: uniqueItems,
+    });
+  } catch (error) {
+    console.error("SECURITY NEWS API ERROR:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
 
 app.get("/", (req, res) => {
   res.send("FRIDAY News Alert is running.");
