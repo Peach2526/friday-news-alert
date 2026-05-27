@@ -401,9 +401,10 @@ function buildNewsMessage({
 }
 
 const SECURITY_NEWS_CACHE = new Map();
+const SECURITY_SUMMARY_CACHE = new Map();
 
 const SECURITY_AREAS = {
-  phuket: {
+    phuket: {
     label: "ภูเก็ต",
     queries: [
       "Phuket nominee business",
@@ -482,8 +483,9 @@ const SECURITY_AREAS = {
   },
 };
 
-function buildGoogleNewsRssUrl(query, lang = "th") {
-  const encodedQuery = encodeURIComponent(`${query} when:7d`);
+function buildGoogleNewsRssUrl(query, lang = "th", hours = 72) {
+  const lookbackDays = Math.max(1, Math.ceil(hours / 24));
+  const encodedQuery = encodeURIComponent(`${query} when:${lookbackDays}d`);
   const hl = lang === "en" ? "en" : "th";
   const ceid = lang === "en" ? "TH:en" : "TH:th";
 
@@ -640,21 +642,182 @@ function enrichSecurityNewsItem(item) {
   };
 }
 
-function isSecurityNewsWithinDays(item, days = 7) {
+function isSecurityNewsWithinHours(item, hours = 72) {
   const date = new Date(item.published_at);
 
-  if (Number.isNaN(date.getTime())) return true;
+  if (Number.isNaN(date.getTime())) return false;
 
   const ageMs = Date.now() - date.getTime();
-  const maxAgeMs = days * 24 * 60 * 60 * 1000;
+  const maxAgeMs = hours * 60 * 60 * 1000;
 
   return ageMs >= 0 && ageMs <= maxAgeMs;
+}
+
+function compactNewsText(value = "") {
+  return String(value || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanSnippetForSummary(item) {
+  const title = compactNewsText(item.title);
+  let snippet = compactNewsText(item.snippet);
+
+  if (!snippet) return "";
+
+  snippet = snippet.replace(title, "").trim();
+  snippet = snippet.split(" - ")[0].split(" | ")[0].trim();
+
+  return compactNewsText(snippet);
+}
+
+function fallbackSecuritySummary(item) {
+  const snippet = cleanSnippetForSummary(item);
+
+  if (snippet && snippet.length >= 35) {
+    return snippet;
+  }
+
+  const title = compactNewsText(item.title);
+
+  if (!title) {
+    return "ไม่มีรายละเอียดข่าวเพียงพอสำหรับสรุปสาระสำคัญ";
+  }
+
+  return `จากข้อมูลที่มี แหล่งข่าวรายงานประเด็นว่า “${title}” โดยควรเปิดอ่านต้นทางเพื่อตรวจสอบรายละเอียดเพิ่มเติม`;
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+async function summarizeSecurityNewsItems(items) {
+  const itemsWithCachedSummary = items.map((item) => {
+    const cachedSummary = SECURITY_SUMMARY_CACHE.get(item.id);
+
+    if (cachedSummary) {
+      return {
+        ...item,
+        summary_th: cachedSummary,
+      };
+    }
+
+    return item;
+  });
+
+  const itemsNeedingSummary = itemsWithCachedSummary.filter((item) => !item.summary_th);
+    if (itemsNeedingSummary.length === 0) {
+    return itemsWithCachedSummary;
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return itemsWithCachedSummary.map((item) => {
+      const summary = item.summary_th || fallbackSecuritySummary(item);
+      SECURITY_SUMMARY_CACHE.set(item.id, summary);
+
+      return {
+        ...item,
+        summary_th: summary,
+      };
+    });
+  }
+
+  const summaryById = new Map();
+
+  for (const group of chunkArray(itemsNeedingSummary, 20)) {
+    const compactItems = group.map((item) => ({
+      id: item.id,
+      area: item.area_label || item.area,
+      source: item.source,
+      published_at: item.published_at,
+      title: compactNewsText(item.title).slice(0, 240),
+      snippet: compactNewsText(item.snippet).slice(0, 700),
+      risk_category: item.risk_category,
+    }));
+
+    const prompt = `
+คุณคือบรรณาธิการข่าวภาษาไทยสำหรับ dashboard ติดตามสถานการณ์ความมั่นคง
+
+งานของคุณ:
+- สรุปสาระสำคัญของข่าวแต่ละรายการเป็นภาษาไทยแบบร้อยแก้ว 1-2 ประโยค
+- ให้สรุปว่าเกิดอะไรขึ้น ใคร/หน่วยงานใดเกี่ยวข้อง พื้นที่หรือผลกระทบคืออะไร เท่าที่ข้อมูลมี
+- ใช้เฉพาะข้อมูลจาก title และ snippet ห้ามแต่งข้อเท็จจริงเพิ่ม
+- ห้ามคัดลอกหัวข้อข่าวซ้ำทั้งประโยค
+- ห้ามเขียนข้อความ template เช่น "ข่าวนี้เกี่ยวข้องกับ..." หรือ "ประเด็นสำคัญของข่าวนี้..."
+- ถ้าข้อมูลมีจำกัด ให้สรุปอย่างระมัดระวังจากข้อมูลที่มี โดยไม่บอกว่า backend ไม่มีสรุป
+
+ตอบกลับเป็น JSON เท่านั้น ตามรูปแบบ:
+{
+  "items": [
+    {
+      "id": "id",
+      "summary_th": "สรุปข่าวภาษาไทย"
+    }
+  ]
+}
+
+รายการข่าว:
+${JSON.stringify(compactItems, null, 2)}
+`;
+
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a careful Thai news summarization assistant. Respond with valid JSON only.",
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+      });
+
+      const content = completion.choices?.[0]?.message?.content || "{}";
+      const parsed = safeJsonParse(content);
+      const summarizedItems = Array.isArray(parsed?.items) ? parsed.items : [];
+
+      for (const summarizedItem of summarizedItems) {
+        const id = String(summarizedItem.id || "").trim();
+        const summary = compactNewsText(summarizedItem.summary_th || "");
+
+        if (id && summary) {
+          summaryById.set(id, summary);
+          SECURITY_SUMMARY_CACHE.set(id, summary);
+        }
+      }
+    } catch (error) {
+      console.error("SECURITY SUMMARY ERROR:", error.response?.data || error.message);
+    }
+  }
+
+  return itemsWithCachedSummary.map((item) => {
+    const summary = item.summary_th || summaryById.get(item.id) || fallbackSecuritySummary(item);
+    SECURITY_SUMMARY_CACHE.set(item.id, summary);
+
+    return {
+      ...item,
+      summary_th: summary,
+    };
+  });
 }
 
 app.get("/api/security-news", async (req, res) => {
   try {
     const area = String(req.query.area || "all").trim();
-    const limit = Math.min(toNumber(req.query.limit, 80), 120);
+    const hours = Math.max(1, Math.min(toNumber(req.query.hours, 72), 168));
     const targetAreas = getSecurityTargetAreas(area);
 
     if (!targetAreas) {
@@ -672,7 +835,7 @@ app.get("/api/security-news", async (req, res) => {
       });
     }
 
-    const cacheKey = `security-news:${area}:${limit}`;
+    const cacheKey = `security-news:${area}:${hours}`;
     const cached = SECURITY_NEWS_CACHE.get(cacheKey);
     const now = Date.now();
     const cacheTtlMs = 5 * 60 * 1000;
@@ -682,6 +845,7 @@ app.get("/api/security-news", async (req, res) => {
         ok: true,
         cached: true,
         area,
+        hours,
         updated_at: new Date(cached.createdAt).toISOString(),
         count: cached.items.length,
         items: cached.items,
@@ -694,11 +858,10 @@ app.get("/api/security-news", async (req, res) => {
       for (const query of areaConfig.queries) {
         try {
           const lang = /[a-zA-Z]/.test(query) ? "en" : "th";
-          const rssUrl = buildGoogleNewsRssUrl(query, lang);
+          const rssUrl = buildGoogleNewsRssUrl(query, lang, hours);
           const feed = await parser.parseURL(rssUrl);
 
           const items = (feed.items || [])
-            .slice(0, 8)
             .map((item) =>
               normalizeSecurityNewsItem(
                 item,
@@ -708,7 +871,7 @@ app.get("/api/security-news", async (req, res) => {
                 feed.title
               )
             )
-            .filter((item) => isSecurityNewsWithinDays(item, 7))
+            .filter((item) => isSecurityNewsWithinHours(item, hours))
             .map(enrichSecurityNewsItem);
 
           allItems.push(...items);
@@ -740,26 +903,24 @@ app.get("/api/security-news", async (req, res) => {
         const dateA = new Date(a.published_at).getTime() || 0;
         const dateB = new Date(b.published_at).getTime() || 0;
 
-        if (b.severity !== a.severity) {
-          return b.severity - a.severity;
-        }
-
         return dateB - dateA;
-      })
-      .slice(0, limit);
+      });
+
+    const summarizedItems = await summarizeSecurityNewsItems(uniqueItems);
 
     SECURITY_NEWS_CACHE.set(cacheKey, {
       createdAt: now,
-      items: uniqueItems,
+      items: summarizedItems,
     });
 
     return res.json({
       ok: true,
       cached: false,
       area,
+      hours,
       updated_at: new Date().toISOString(),
-      count: uniqueItems.length,
-      items: uniqueItems,
+      count: summarizedItems.length,
+      items: summarizedItems,
     });
   } catch (error) {
     console.error("SECURITY NEWS API ERROR:", error.message);
@@ -840,7 +1001,6 @@ app.get("/test-sheet", async (req, res) => {
     });
   }
 });
-
 app.get("/debug-env", (req, res) => {
   res.json({
     sheet_id: process.env.GOOGLE_SHEET_ID,
