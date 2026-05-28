@@ -698,6 +698,25 @@ function chunkArray(items, size) {
   return chunks;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function parseGoogleNewsWithRetry(rssUrl, retries = 1) {
+  try {
+    return await parser.parseURL(rssUrl);
+  } catch (error) {
+    const message = String(error.message || "");
+
+    if (retries > 0 && message.includes("503")) {
+      await sleep(3000);
+      return parseGoogleNewsWithRetry(rssUrl, retries - 1);
+    }
+
+    throw error;
+  }
+}
+
 async function summarizeSecurityNewsItems(items) {
   const itemsWithCachedSummary = items.map((item) => {
     const cachedSummary = SECURITY_SUMMARY_CACHE.get(item.id);
@@ -838,7 +857,7 @@ app.get("/api/security-news", async (req, res) => {
     const cacheKey = `security-news:${area}:${hours}`;
     const cached = SECURITY_NEWS_CACHE.get(cacheKey);
     const now = Date.now();
-    const cacheTtlMs = 5 * 60 * 1000;
+    const cacheTtlMs = 15 * 60 * 1000;
 
     if (cached && now - cached.createdAt < cacheTtlMs) {
       return res.json({
@@ -859,7 +878,8 @@ app.get("/api/security-news", async (req, res) => {
         try {
           const lang = /[a-zA-Z]/.test(query) ? "en" : "th";
           const rssUrl = buildGoogleNewsRssUrl(query, lang, hours);
-          const feed = await parser.parseURL(rssUrl);
+          await sleep(1500);
+const feed = await parseGoogleNewsWithRetry(rssUrl, 1);
 
           const items = (feed.items || [])
             .map((item) =>
