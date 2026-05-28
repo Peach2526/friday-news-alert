@@ -4,13 +4,54 @@ import { google } from "googleapis";
 import Parser from "rss-parser";
 import crypto from "crypto";
 import OpenAI from "openai";
+import NodeCache from "node-cache";
+import Bottleneck from "bottleneck";
 
 const app = express();
 const parser = new Parser();
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const newsCache = new NodeCache({
+  stdTTL: 10 * 60,
+  checkperiod: 60,
 });
+
+const summaryCache = new NodeCache({
+  stdTTL: 24 * 60 * 60,
+  checkperiod: 10 * 60,
+});
+
+const rssLimiter = new Bottleneck({
+  maxConcurrent: 1,
+  minTime: 1500,
+});
+
+async function withRetry(taskFn, retries = 3) {
+  let lastError;
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      return await taskFn();
+    } catch (error) {
+      lastError = error;
+
+      const waitMs = [1000, 3000, 6000][attempt] || 6000;
+
+      console.warn(
+        `RSS retry ${attempt + 1}/${retries} after ${waitMs}ms`,
+        error.message
+      );
+
+      await sleep(waitMs);
+    }
+  }
+
+  throw lastError;
+}
+
+const openai = process.env.OPENAI_API_KEY
+  ? new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    })
+  : null;
 
 app.use(express.json());
 
@@ -702,14 +743,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function parseGoogleNewsWithRetry(rssUrl, retries = 1) {
+async function parseGoogleNewsWithRetry(rssUrl, retries = 3) {
   try {
-    return await parser.parseURL(rssUrl);
+    return await rssLimiter.schedule(() =>
+      parser.parseURL(rssUrl)
+    );
   } catch (error) {
     const message = String(error.message || "");
 
     if (retries > 0 && message.includes("503")) {
-      await sleep(3000);
+      const waitMs = [1000, 3000, 6000][3 - retries] || 6000;
+
+      console.warn(`RSS retry after ${waitMs}ms`);
+
+      await sleep(waitMs);
+
       return parseGoogleNewsWithRetry(rssUrl, retries - 1);
     }
 
@@ -879,7 +927,7 @@ app.get("/api/security-news", async (req, res) => {
           const lang = /[a-zA-Z]/.test(query) ? "en" : "th";
           const rssUrl = buildGoogleNewsRssUrl(query, lang, hours);
           await sleep(1500);
-const feed = await parseGoogleNewsWithRetry(rssUrl, 1);
+          const feed = await parseGoogleNewsWithRetry(rssUrl, 3);
 
           const items = (feed.items || [])
             .map((item) =>
