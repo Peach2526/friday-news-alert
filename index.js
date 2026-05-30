@@ -299,6 +299,7 @@ async function analyzeArticleWithOpenAI({
   title,
   link,
   pubDate,
+  snippet,
 }) {
   if (!process.env.OPENAI_API_KEY) {
     return {
@@ -321,7 +322,7 @@ async function analyzeArticleWithOpenAI({
   "relevant": true,
   "importance_score": 1,
   "urgency_score": 1,
-  "summary_th": "สรุปข่าวภาษาไทยแบบละเอียด 3-5 ประโยค โดยอธิบายว่าเกิดอะไรขึ้น ใครเกี่ยวข้อง ผลกระทบคืออะไร และสถานการณ์ล่าสุด",
+  "summary_th": "สรุปข่าวภาษาไทยแบบละเอียด 4-6 ประโยค โดยอธิบายว่าเกิดอะไรขึ้น ใครหรือหน่วยงานใดเกี่ยวข้อง พื้นที่ใดเกี่ยวข้อง ผลกระทบหรือความสำคัญคืออะไร และสถานการณ์ล่าสุดเท่าที่ข้อมูลมี",
   "reason_th": "เหตุผลสั้น ๆ ว่าทำไมข่าวนี้ควรหรือไม่ควรถูกเลือก"
 }
 
@@ -330,9 +331,11 @@ async function analyzeArticleWithOpenAI({
 - urgency_score ให้ 1-10
 - ถ้าเป็นข่าวสำคัญ เช่น ความขัดแย้ง ความมั่นคง การทูต เหตุรุนแรง นโยบายรัฐ ผลกระทบสาธารณะ ให้คะแนนสูง
 - ถ้าเป็นข่าวท่องเที่ยวทั่วไป รีวิว โรงแรม โปรโมชัน บทความ evergreen หรือข้อมูลพื้นหลังที่ไม่ใช่ข่าวใหม่ ให้ relevant=false หรือคะแนนต่ำ
-- summary_th ให้สรุปละเอียด อ่านแล้วเข้าใจข่าวได้ทันที
-- ใช้ภาษาไทยแบบข่าวสั้น อ่านง่าย
-- ถ้าข้อมูลมีจำกัด ห้ามเดาเกินข้อมูลข่าว
+- summary_th ต้องอ่านแล้วเข้าใจสาระสำคัญของข่าวได้โดยไม่ต้องเปิดลิงก์ทันที
+- ให้สรุปแบบข่าวราชการ/ข่าวสถานการณ์ ใช้ภาษาทางการ กระชับ ชัดเจน
+- ให้ระบุบุคคล หน่วยงาน พื้นที่ หรือกลุ่มที่เกี่ยวข้อง หากข้อมูลมี
+- ให้ระบุผลกระทบด้านความมั่นคง สังคม เศรษฐกิจ การท่องเที่ยว หรือการบังคับใช้กฎหมาย หากเกี่ยวข้อง
+- ถ้าข้อมูลมีจำกัด ให้สรุปเฉพาะจากหัวข้อข่าวและเนื้อหาย่อจาก RSS ห้ามเดาหรือแต่งข้อมูลเพิ่ม
 
 หัวข้อที่ติดตาม: ${topicName}
 keywords: ${keywords}
@@ -1223,6 +1226,7 @@ app.get("/run-news-check", async (req, res) => {
             link,
             pubDate: item.isoDate || item.pubDate || "",
             articleDate,
+            snippet: item.contentSnippet || item.content || "",
           });
         }
       }
@@ -1247,6 +1251,7 @@ app.get("/run-news-check", async (req, res) => {
           title: candidate.title,
           link: candidate.link,
           pubDate: candidate.pubDate,
+          snippet: candidate.snippet,
         });
 
         if (!analysis.relevant) {
