@@ -206,6 +206,38 @@ function getRecencyBonus(date, now = new Date()) {
   return 0;
 }
 
+async function fetchRssFeed(url) {
+  let response;
+
+  try {
+    response = await axios.get(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+        Accept: "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+      },
+      timeout: 30000,
+    });
+  } catch (error) {
+    const status = error.response?.status;
+    const statusText = error.response?.statusText;
+
+    if (status) {
+      throw new Error(
+        `RSS HTTP ${status}${statusText ? ` ${statusText}` : ""}`
+      );
+    }
+
+    throw new Error(`RSS fetch failed: ${error.message}`);
+  }
+
+  try {
+    return await parser.parseString(response.data);
+  } catch (error) {
+    throw new Error(`RSS parser error: ${error.message}`);
+  }
+}
+
 function sourceBelongsToTopic(source, topic) {
   const sourceId = String(source.source_id || "").toLowerCase();
   const sourceName = String(source.source_name || "").toLowerCase();
@@ -219,17 +251,13 @@ function sourceBelongsToTopic(source, topic) {
   // RSS ตรงแบบรวมข่าว ให้ทุก topic ใช้ร่วมกัน
   const sharedSources = [
     "bangkokpost",
-    "nation",
-    "thaipbs",
     "khaosod",
-    "phuketnews",
     "phuketexpress",
-    "mgronline",
     "matichon",
-    "dsi"
   ];
 
-  return sharedSources.some((key) => sourceId.includes(key));
+  const sourceText = `${sourceId} ${sourceName}`;
+  return sharedSources.some((key) => sourceText.includes(key));
 }
 
 async function sendLineMessage(text) {
@@ -607,38 +635,30 @@ app.get("/run-news-check", async (req, res) => {
 
         try {
           console.log("FETCH RSS:", source.source_name);
-          console.log("RSS URL:", source.url);
 
           await new Promise((resolve) => setTimeout(resolve, 8000));
-          
-          const response = await axios.get(source.url, {
-  headers: {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-    "Accept":
-      "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8"
-  },
-  timeout: 30000
-});
 
-feed = await parser.parseString(response.data);
+          feed = await fetchRssFeed(source.url);
+
+          console.log("RSS OK:", source.source_name, feed.items?.length || 0);
         } catch (error) {
-  console.error(
-    "RSS ERROR:",
-    source.source_name,
-    source.url,
-    error.message
-  );
+          console.error(
+            "RSS ERROR:",
+            source.source_name,
+            source.url,
+            error.message
+          );
 
-  results.push({
-    topic_id: topic.topic_id,
-    source: source.source_name,
-    status: "source_error",
-    reason: error.message,
-  });
+          results.push({
+            topic_id: topic.topic_id,
+            source: source.source_name,
+            url: source.url,
+            status: "source_error",
+            reason: error.message,
+          });
 
-  continue;
-}
+          continue;
+        }
 
         const items = feed.items || [];
 
