@@ -587,16 +587,27 @@ app.get("/run-news-check", async (req, res) => {
         let feed;
 
         try {
+          console.log("FETCH RSS:", source.source_name);
+          console.log("RSS URL:", source.url);
+
           feed = await parser.parseURL(source.url);
         } catch (error) {
-          results.push({
-            topic_id: topic.topic_id,
-            source: source.source_name,
-            status: "source_error",
-            reason: error.message,
-          });
-          continue;
-        }
+  console.error(
+    "RSS ERROR:",
+    source.source_name,
+    source.url,
+    error.message
+  );
+
+  results.push({
+    topic_id: topic.topic_id,
+    source: source.source_name,
+    status: "source_error",
+    reason: error.message,
+  });
+
+  continue;
+}
 
         const items = feed.items || [];
 
