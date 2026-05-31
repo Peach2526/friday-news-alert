@@ -208,9 +208,28 @@ function getRecencyBonus(date, now = new Date()) {
 
 function sourceBelongsToTopic(source, topic) {
   const sourceId = String(source.source_id || "").toLowerCase();
+  const sourceName = String(source.source_name || "").toLowerCase();
   const topicId = String(topic.topic_id || "").toLowerCase();
+  const topicName = String(topic.topic_name || "").toLowerCase();
 
-  return sourceId.includes(topicId);
+  if (sourceId.includes(topicId)) return true;
+  if (sourceName.includes(topicId)) return true;
+  if (sourceName.includes(topicName)) return true;
+
+  // RSS ตรงแบบรวมข่าว ให้ทุก topic ใช้ร่วมกัน
+  const sharedSources = [
+    "bangkokpost",
+    "nation",
+    "thaipbs",
+    "khaosod",
+    "phuketnews",
+    "phuketexpress",
+    "mgronline",
+    "matichon",
+    "dsi"
+  ];
+
+  return sharedSources.some((key) => sourceId.includes(key));
 }
 
 async function sendLineMessage(text) {
