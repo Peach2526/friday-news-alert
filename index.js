@@ -590,6 +590,8 @@ app.get("/run-news-check", async (req, res) => {
           console.log("FETCH RSS:", source.source_name);
           console.log("RSS URL:", source.url);
 
+          await new Promise((resolve) => setTimeout(resolve, 8000));
+          
           const response = await axios.get(source.url, {
   headers: {
     "User-Agent":
