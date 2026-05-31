@@ -590,7 +590,17 @@ app.get("/run-news-check", async (req, res) => {
           console.log("FETCH RSS:", source.source_name);
           console.log("RSS URL:", source.url);
 
-          feed = await parser.parseURL(source.url);
+          const response = await axios.get(source.url, {
+  headers: {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+    "Accept":
+      "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8"
+  },
+  timeout: 30000
+});
+
+feed = await parser.parseString(response.data);
         } catch (error) {
   console.error(
     "RSS ERROR:",
